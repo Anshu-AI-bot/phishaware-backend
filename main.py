@@ -1,34 +1,43 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from urllib.parse import urlparse
 import socket
 import whois
 import requests
 from datetime import datetime
+import os
 
-# CONFIG
-VT_API_KEY = "ca36d89438639f95586b9e775f8be0df49426f01ba2719559d0012453aedc32c"
+
+VT_API_KEY = os.getenv("VT_API_KEY")
 
 app = FastAPI()
 
-# INPUT MODEL
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class URLRequest(BaseModel):
     url: str
 
-# HOME ROUTE
+
 @app.get("/")
 def home():
     return {"message": "Backend is working!"}
 
-# VIRUSTOTAL CHECK
-def check_virustotal(url):
-    try:
-        headers = {
-            "x-apikey": VT_API_KEY
-        }
 
-        # Submit URL
+def check_virustotal(url):
+    if not VT_API_KEY:
+        return None
+
+    try:
+        headers = {"x-apikey": VT_API_KEY}
+
         response = requests.post(
             "https://www.virustotal.com/api/v3/urls",
             headers=headers,
@@ -41,11 +50,13 @@ def check_virustotal(url):
         result = response.json()
         analysis_id = result["data"]["id"]
 
-        # Get report
         report = requests.get(
             f"https://www.virustotal.com/api/v3/analyses/{analysis_id}",
             headers=headers
         )
+
+        if report.status_code != 200:
+            return None
 
         stats = report.json()["data"]["attributes"]["stats"]
 
@@ -57,13 +68,11 @@ def check_virustotal(url):
     except:
         return None
 
-# MAIN ANALYZER
+
 @app.post("/analyze-url")
 def analyze(data: URLRequest):
-
     url = data.url.lower().strip()
 
-    # Add http if missing
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "http://" + url
 
@@ -73,7 +82,6 @@ def analyze(data: URLRequest):
     score = 0
     reasons = []
 
-    # BASIC URL CHECKS
     suspicious_words = [
         "login",
         "verify",
@@ -108,14 +116,12 @@ def analyze(data: URLRequest):
         score += 10
         reasons.append("Not using HTTPS")
 
-    # DNS CHECK
     try:
         socket.gethostbyname(domain)
     except:
         score += 25
         reasons.append("Domain does not resolve")
 
-    # WHOIS DOMAIN AGE CHECK
     try:
         info = whois.whois(domain)
         created = info.creation_date
@@ -129,7 +135,6 @@ def analyze(data: URLRequest):
             if age_days < 30:
                 score += 35
                 reasons.append("Very new domain (<30 days)")
-
             elif age_days < 180:
                 score += 20
                 reasons.append("Recently created domain")
@@ -137,7 +142,6 @@ def analyze(data: URLRequest):
     except:
         reasons.append("Domain age unavailable")
 
-    # TRUSTED DOMAINS
     trusted = [
         "google.com",
         "microsoft.com",
@@ -150,7 +154,6 @@ def analyze(data: URLRequest):
         score -= 25
         reasons.append("Recognized trusted domain")
 
-    # VIRUSTOTAL CHECK
     vt_hits = check_virustotal(url)
 
     if vt_hits is not None:
@@ -162,7 +165,6 @@ def analyze(data: URLRequest):
     else:
         reasons.append("VirusTotal check unavailable")
 
-    # FINAL SCORE
     score = max(0, min(score, 100))
 
     if score >= 70:
